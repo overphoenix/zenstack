@@ -7,8 +7,8 @@
         "lint": "pnpm -r lint",
         "test": "ZENSTACK_TEST=1 pnpm -r run test --silent --forceExit",
         "test-ci": "ZENSTACK_TEST=1 pnpm -r run test --silent --forceExit",
-        "publish-all": "pnpm --filter \"./packages/**\" -r publish --access public",
-        "publish-preview": "pnpm --filter \"./packages/**\" -r publish --force --registry https://preview.registry.zenstack.dev/",
+        "publish-all": "pnpm --filter \"./packages/**\" -r publish --access public --tag canary",
+        "publish-preview": "pnpm --filter \"./packages/**\" -r publish --force --registry https://preview.registry.zenstack.dev/ --tag canary",
         "unpublish-preview": "pnpm --recursive --shell-mode exec -- npm unpublish -f --registry https://preview.registry.zenstack.dev/ \"\\$PNPM_PACKAGE_NAME\""
     },
     "keywords": [],

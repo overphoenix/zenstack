@@ -16,6 +16,7 @@ import {
     GeneratorDecl,
     InvocationExpr,
     isArrayExpr,
+    isDataModel,
     isInvocationExpr,
     isLiteralExpr,
     isReferenceExpr,
@@ -28,6 +29,7 @@ import { match } from 'ts-pattern';
 
 import { PRISMA_MINIMUM_VERSION } from '@zenstackhq/runtime';
 import {
+    getAttribute,
     getDMMF,
     getLiteral,
     getPrismaVersion,
@@ -46,6 +48,7 @@ import { getStringLiteral } from '../../language-server/validator/utils';
 import telemetry from '../../telemetry';
 import { execSync } from '../../utils/exec-utils';
 import {
+    AttributeArgValue,
     ModelFieldType,
     AttributeArg as PrismaAttributeArg,
     AttributeArgValue as PrismaAttributeArgValue,
@@ -63,6 +66,9 @@ import {
     SimpleField,
 } from './prisma-builder';
 import { ZModelCodeGenerator } from '@zenstackhq/sdk';
+import { lowerCaseFirst } from 'lower-case-first';
+import { getIdFields } from '../../utils/ast-utils';
+import { upperCaseFirst } from 'upper-case-first';
 
 const MODEL_PASSTHROUGH_ATTR = '@@prisma.passthrough';
 const FIELD_PASSTHROUGH_ATTR = '@prisma.passthrough';
@@ -71,7 +77,7 @@ const FIELD_PASSTHROUGH_ATTR = '@prisma.passthrough';
  * Generates Prisma schema file
  */
 export default class PrismaSchemaGenerator {
-    private zModelGenerator: ZModelCodeGenerator = new ZModelCodeGenerator();
+    private readonly zModelGenerator: ZModelCodeGenerator = new ZModelCodeGenerator();
 
     private readonly PRELUDE = `//////////////////////////////////////////////////////////////////////////////////////////////
 // DO NOT MODIFY THIS FILE                                                                  //
@@ -79,6 +85,11 @@ export default class PrismaSchemaGenerator {
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 `;
+
+    constructor(
+        private readonly polymorphism: 'logical' | 'physical' = 'physical',
+        private readonly overrideClientGenerationPath?: string
+    ) {}
 
     async generate(model: Model, options: PluginOptions) {
         const warnings: string[] = [];
@@ -251,6 +262,15 @@ export default class PrismaSchemaGenerator {
                     }
                 }
             }
+
+            if (this.overrideClientGenerationPath) {
+                const output = generator.fields.find((f) => f.name === 'output');
+                if (output) {
+                    output.text = JSON.stringify(this.overrideClientGenerationPath);
+                } else {
+                    generator.fields.push({ name: 'output', text: JSON.stringify(this.overrideClientGenerationPath) });
+                }
+            }
         }
     }
 
@@ -270,6 +290,150 @@ export default class PrismaSchemaGenerator {
 
         // user defined comments pass-through
         decl.comments.forEach((c) => model.addComment(c));
+
+        this.generatePolymorphicForBaseModel(model, decl);
+        this.generatePolymorphicForConcreteModel(model, decl);
+        this.generatePolymorphicRelations(model, decl);
+    }
+
+    private generatePolymorphicForBaseModel(model: PrismaDataModel, decl: DataModel) {
+        const concreteModels = decl.$container.declarations.filter(
+            (d) => isDataModel(d) && d !== decl && d.superTypes.some((base) => base.ref === decl)
+        );
+
+        if (concreteModels.length > 0) {
+            // insert a type field
+            model.addField('delegatedType', 'String');
+
+            if (this.polymorphism === 'physical') {
+                concreteModels.forEach((concrete) => {
+                    const auxName = `${lowerCaseFirst(concrete.name)}`;
+                    model.addField(auxName, new ModelFieldType(concrete.name, false, true));
+                });
+            }
+        }
+    }
+
+    private generatePolymorphicForConcreteModel(model: PrismaDataModel, decl: DataModel) {
+        const baseModels = decl.superTypes
+            .map((t) => t.ref)
+            .filter((t): t is DataModel => !!t)
+            .filter((t) => !t.isAbstract);
+
+        baseModels.forEach((base) => {
+            const idFields = getIdFields(base);
+
+            // copy over all fields from base
+            baseModels.forEach((base) => {
+                base.fields.reverse().forEach((field) => {
+                    if (idFields.includes(field) || this.polymorphism === 'logical') {
+                        this.generateModelField(model, field, true);
+                    }
+                });
+            });
+
+            if (this.polymorphism === 'physical') {
+                // add relation and fk fields
+                const relationField = `${lowerCaseFirst(base.name)}`;
+                model.addField(relationField, base.name, [
+                    new PrismaFieldAttribute('@relation', [
+                        new PrismaAttributeArg(
+                            'fields',
+                            new AttributeArgValue(
+                                'Array',
+                                idFields.map(
+                                    (idField) =>
+                                        new AttributeArgValue(
+                                            'FieldReference',
+                                            new PrismaFieldReference(
+                                                `${lowerCaseFirst(base.name)}${upperCaseFirst(idField.name)}`
+                                            )
+                                        )
+                                )
+                            )
+                        ),
+                        new PrismaAttributeArg(
+                            'references',
+                            new AttributeArgValue(
+                                'Array',
+                                idFields.map(
+                                    (idField) =>
+                                        new AttributeArgValue('FieldReference', new PrismaFieldReference(idField.name))
+                                )
+                            )
+                        ),
+                        new PrismaAttributeArg(
+                            'onDelete',
+                            new AttributeArgValue('FieldReference', new PrismaFieldReference('Cascade'))
+                        ),
+                        new PrismaAttributeArg(
+                            'onUpdate',
+                            new AttributeArgValue('FieldReference', new PrismaFieldReference('Cascade'))
+                        ),
+                    ]),
+                ]);
+
+                idFields.forEach((idField) => {
+                    const fkField = `${lowerCaseFirst(base.name)}${upperCaseFirst(idField.name)}`;
+                    model.addField(fkField, idField.type.type!, [new PrismaFieldAttribute('@unique')]);
+                });
+            } else {
+                // model.addField('type', 'String');
+            }
+        });
+    }
+
+    private generatePolymorphicRelations(model: PrismaDataModel, decl: DataModel) {
+        if (this.polymorphism !== 'logical') {
+            return;
+        }
+
+        decl.fields.forEach((f) => {
+            const fieldType = f.type.reference?.ref;
+            if (!isDataModel(fieldType)) {
+                return;
+            }
+
+            const concreteModels = decl.$container.declarations.filter(
+                (d) => isDataModel(d) && d.superTypes.some((s) => s.ref === fieldType)
+            );
+
+            concreteModels.forEach((concrete) => {
+                const relationField = model.addField(
+                    `poly_aux_${lowerCaseFirst(concrete.name)}`,
+                    new ModelFieldType(concrete.name, f.type.array, f.type.optional)
+                );
+                const relAttr = getAttribute(f, '@relation');
+                if (relAttr) {
+                    const fieldsArg = relAttr.args.find((arg) => arg.name === 'fields');
+                    if (fieldsArg) {
+                        const idFields = getIdFields(fieldType);
+                        idFields.forEach((idField) => {
+                            model.addField(
+                                `poly_aux_${lowerCaseFirst(concrete.name)}${upperCaseFirst(idField.name)}`,
+                                idField.type.type!
+                            );
+                        });
+
+                        const args = new AttributeArgValue(
+                            'Array',
+                            idFields.map(
+                                (idField) =>
+                                    new AttributeArgValue('FieldReference', new PrismaFieldReference(idField.name))
+                            )
+                        );
+                        relationField.attributes.push(
+                            new PrismaFieldAttribute('@relation', [
+                                new PrismaAttributeArg('fields', args),
+                                new PrismaAttributeArg('references', args),
+                            ])
+                        );
+                    } else {
+                        relationField.attributes.push(this.makeFieldAttribute(relAttr as DataModelFieldAttribute));
+                    }
+                }
+            });
+        });
     }
 
     private isPrismaAttribute(attr: DataModelAttribute | DataModelFieldAttribute) {
@@ -298,7 +462,7 @@ export default class PrismaSchemaGenerator {
         }
     }
 
-    private generateModelField(model: PrismaDataModel, field: DataModelField) {
+    private generateModelField(model: PrismaDataModel, field: DataModelField, addToFront = false) {
         const fieldType =
             field.type.type || field.type.reference?.ref?.name || this.getUnsupportedFieldType(field.type);
         if (!fieldType) {
@@ -315,7 +479,7 @@ export default class PrismaSchemaGenerator {
 
         const documentations = nonPrismaAttributes.map((attr) => '/// ' + this.zModelGenerator.generate(attr));
 
-        const result = model.addField(field.name, type, attributes, documentations);
+        const result = model.addField(field.name, type, attributes, documentations, addToFront);
 
         // user defined comments pass-through
         field.comments.forEach((c) => result.addComment(c));

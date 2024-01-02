@@ -73,7 +73,7 @@ export class ZModelScopeComputation extends DefaultScopeComputation {
             if (decl.$type === 'DataModel') {
                 const dataModel = decl as DataModel;
                 dataModel.$resolvedFields = [...dataModel.fields];
-                this.getRecursiveSuperTypes(dataModel).forEach((superType) => {
+                this.getRecursiveAbstractBases(dataModel).forEach((superType) => {
                     superType.fields.forEach((field) => {
                         const cloneField = Object.assign({}, field);
                         cloneField.$isInherited = true;
@@ -87,13 +87,13 @@ export class ZModelScopeComputation extends DefaultScopeComputation {
         });
     }
 
-    private getRecursiveSuperTypes(dataModel: DataModel): DataModel[] {
+    private getRecursiveAbstractBases(dataModel: DataModel): DataModel[] {
         const result: DataModel[] = [];
         dataModel.superTypes.forEach((superType) => {
             const superTypeDecl = superType.ref;
-            if (superTypeDecl) {
+            if (superTypeDecl?.isAbstract) {
                 result.push(superTypeDecl);
-                result.push(...this.getRecursiveSuperTypes(superTypeDecl));
+                result.push(...this.getRecursiveAbstractBases(superTypeDecl));
             }
         });
         return result;

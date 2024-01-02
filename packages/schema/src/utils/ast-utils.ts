@@ -31,12 +31,14 @@ export function mergeBaseModel(model: Model) {
         .forEach((decl) => {
             const dataModel = decl as DataModel;
 
-            dataModel.fields = dataModel.superTypes
+            const abstractBases = dataModel.superTypes.filter((t) => t.ref?.isAbstract);
+
+            dataModel.fields = abstractBases
                 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                 .flatMap((superType) => updateContainer(superType.ref!.fields, dataModel))
                 .concat(dataModel.fields);
 
-            dataModel.attributes = dataModel.superTypes
+            dataModel.attributes = abstractBases
                 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                 .flatMap((superType) => updateContainer(superType.ref!.attributes, dataModel))
                 .concat(dataModel.attributes);

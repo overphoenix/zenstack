@@ -207,6 +207,11 @@ attribute @@id(_ fields: FieldReference[], name: String?, map: String?, length: 
 attribute @@unique(_ fields: FieldReference[], name: String?, map: String?, length: Int?, sort: String?, clustered: Boolean?) @@@prisma
 
 /**
+ * Marks a model as delegated (polymorphic).
+ */
+attribute @@delegate()
+
+/**
  * Index types
  */
 enum IndexType {
